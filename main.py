@@ -8,7 +8,6 @@ def main():
     print ("test 7")
     print ("test 8")
     print ("test 7")
-    print ("test 8")
     print ("test 9")
     print ("test 10")
  if __name__ == "__main__":
