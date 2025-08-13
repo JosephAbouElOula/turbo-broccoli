@@ -1,3 +1,4 @@
+
 name: AI Attribution Check
 
 on:
@@ -21,7 +22,6 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const core = require('@actions/core');
             const { execSync } = require('child_process');
 
             // 1) Read PR body (description), not comments
@@ -50,7 +50,7 @@ jobs:
 
             core.setOutput('ai_pct', String(ai));
 
-            // 4) Compute added/deleted lines (objective basis)
+            // 4) Compute added/deleted lines
             const base = pr.base.sha;
             const head = pr.head.sha;
             execSync(`git fetch --no-tags --prune --depth=1 origin +${base}:${base} +${head}:${head}`, { stdio: "inherit" });
