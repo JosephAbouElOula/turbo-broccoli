@@ -4,6 +4,7 @@ def main():
     print ("test 3")
     print ("test 4")
     print ("test 5")    
-    print ("test 6")
+    print ("test 6")    
+    print ("test 7")
  if __name__ == "__main__":
     main()
