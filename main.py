@@ -3,6 +3,11 @@ def print_sum(a, b):
     print(a + b)
 
 
+def sum_three(int1, int2, int3):
+    """Return the sum of three integers."""
+    return int1 + int2 + int3
+
+
 def main():
     print("test 1")
     print("test 2")
@@ -16,6 +21,10 @@ def main():
     print("test 9")
     print("test 10")
     print_sum(2, 3)
+    int1 = 1
+    int2 = 2
+    int3 = 3
+    print(sum_three(int1, int2, int3))
 
 
 if __name__ == "__main__":
