@@ -14,85 +14,10 @@ permissions:
   issues: write
 
 jobs:
-  ai-attribution:  # <— stable job name for branch protection
+  ai-attribution:  # context: "AI Attribution Check / ai-attribution"
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Validate AI% in PR description & capture counts
-        id: validate
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // PR description (not comments)
-            const pr = context.payload.pull_request;
-            const body = pr?.body ?? "";
-            core.info("----- PR BODY BEGIN -----\n" + body + "\n----- PR BODY END -----");
-
-            // Find the declaration line
-            const line = (body.split(/\r?\n/).find(l =>
-              /^[-*]?\s*Estimated % of new\/changed code from AI/i.test(l)
-            )) || "";
-
-            if (!line) { core.setFailed("Missing line: 'Estimated % of new/changed code from AI (0–100): <number>' in PR DESCRIPTION."); return; }
-            if (line.includes("__")) { core.setFailed("Placeholder '__' found. Enter an integer 0–100 in the PR DESCRIPTION."); return; }
-
-            // Number AFTER the colon (ignore '(0–100)')
-            const m = line.match(/:\s*([0-9]{1,3})\b/);
-            if (!m) { core.setFailed("Missing integer after ':' on the Estimated % line."); return; }
-            const ai = Number(m[1]);
-            if (!(ai >= 0 && ai <= 100)) { core.setFailed(`Invalid AI%: '${ai}'. Must be 0–100.`); return; }
-            core.setOutput('ai_pct', String(ai));
-
-            // Reliable counts from PR payload
-            core.setOutput('added', String(Number(pr.additions || 0)));
-            core.setOutput('deleted', String(Number(pr.deletions || 0)));
-
-      - name: Comment JSON summary (always)
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const ai = core.getInput('ai_pct') || null;
-            const added = Number(core.getInput('added') || 0);
-            const deleted = Number(core.getInput('deleted') || 0);
-            const summary = {
-              declared_ai_pct: (ai === null || isNaN(Number(ai))) ? null : Number(ai),
-              added_lines: added,
-              deleted_lines: deleted
-            };
-            const outcome = '${{ job.status }}';
-            let body = "AI Attribution Summary\n\n```json\n" + JSON.stringify(summary, null, 2) + "\n```";
-            if (outcome === 'failure') body += "\n\n**Reason:** Validation failed. Put an integer 0–100 after the colon in the PR description.";
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body
-            });
-name: AI Attribution Check
-
-on:
-  pull_request:
-    types: [opened, edited, synchronize]
-
-concurrency:
-  group: ai-attrib-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
-jobs:
-  ai-attribution:  # context shown in branch protection: "AI Attribution Check / ai-attribution"
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate AI% and compute LOC (via PR Files API)
+      - name: Validate AI% and compute LOC via PR Files API
         id: validate
         uses: actions/github-script@v7
         with:
@@ -138,10 +63,10 @@ jobs:
             const changed = added + deleted;
             const net = added - deleted;
 
-            core.setOutput('added', String(added));
+            core.setOutput('added',   String(added));
             core.setOutput('deleted', String(deleted));
             core.setOutput('changed', String(changed));
-            core.setOutput('net', String(net));
+            core.setOutput('net',     String(net));
 
       - name: Post PR comment (always)
         if: always()
@@ -154,7 +79,7 @@ jobs:
           NET_DELTA:       ${{ steps.validate.outputs.net }}
         with:
           script: |
-            const ai      = process.env.DECLARED_AI_PCT;
+            const ai      = process.env.DECLORED_AI_PCT ?? process.env.DECLARED_AI_PCT; // back-compat typo guard
             const added   = Number(process.env.ADDED_LINES   || 0);
             const deleted = Number(process.env.DELETED_LINES || 0);
             const changed = Number(process.env.CHANGED_LINES || 0);
