@@ -8,6 +8,7 @@ def sum_three(int1, int2, int3):
     return int1 + int2 + int3
 
 
+
 def main():
     print("test 1")
     print("test 2")
@@ -25,6 +26,7 @@ def main():
     int2 = 2
     int3 = 3
     print(sum_three(int1, int2, int3))
+
 
 
 if __name__ == "__main__":
