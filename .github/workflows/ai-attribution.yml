@@ -4,6 +4,10 @@ on:
   pull_request:
     types: [opened, edited, synchronize]
 
+concurrency:
+  group: ai-attrib-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -13,75 +17,67 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (not required for counts, but harmless)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Validate AI% in PR description and compute diff
+      - name: Validate AI% in PR description & capture counts
         id: validate
         uses: actions/github-script@v7
         with:
           script: |
-            const { execSync } = require('child_process');
-
-            // 1) Read PR body (description), not comments
+            // 1) Read PR description (NOT comments)
             const pr = context.payload.pull_request;
-            const body = (pr && pr.body) ? pr.body : "";
+            const body = pr?.body ?? "";
             core.info("----- PR BODY BEGIN -----\n" + body + "\n----- PR BODY END -----");
 
-            // 2) Find the specific line
-            const line = body.split(/\r?\n/).find(l =>
+            // 2) Extract the declaration line
+            const line = (body.split(/\r?\n/).find(l =>
               /^[-*]?\s*Estimated % of new\/changed code from AI/i.test(l)
-            ) || "";
+            )) || "";
 
-            if (!line) {
-              core.setFailed("Missing 'Estimated % of new/changed code from AI' line in PR DESCRIPTION.");
-            }
-            if (line.includes("__")) {
-              core.setFailed("Placeholder '__' found. Enter an integer 0–100 in the PR DESCRIPTION.");
-            }
+            if (!line) { core.setFailed("Missing line: 'Estimated % of new/changed code from AI (0–100): <number>' in PR DESCRIPTION."); return; }
+            if (line.includes("__")) { core.setFailed("Placeholder '__' found. Enter an integer 0–100 in the PR DESCRIPTION."); return; }
 
-            // 3) Extract the integer **after the colon**
+            // 3) Get the integer **after the colon** (ignore '(0–100)')
             const m = line.match(/:\s*([0-9]{1,3})\b/);
-            if (!m) {
-              core.setFailed("Missing integer after ':' on the Estimated % line.");
-            }
-            const ai = Number(m ? m[1] : NaN);
-            if (!(ai >= 0 && ai <= 100)) {
-              core.setFailed(`Invalid AI%: '${ai}'. Must be an integer between 0 and 100.`);
-            }
+            if (!m) { core.setFailed("Missing integer after ':' on the Estimated % line."); return; }
+            const ai = Number(m[1]);
+            if (!(ai >= 0 && ai <= 100)) { core.setFailed(`Invalid AI%: '${ai}'. Must be 0–100.`); return; }
             core.setOutput('ai_pct', String(ai));
 
-            // 4) Compute added/deleted lines
-            const base = pr.base.sha;
-            const head = pr.head.sha;
-            execSync(`git fetch --no-tags --prune --depth=1 origin +${base}:${base} +${head}:${head}`, { stdio: "inherit" });
-            const diff = execSync(`git diff --numstat ${base} ${head}`, { encoding: 'utf8' });
-            let add = 0, del = 0;
-            diff.split(/\r?\n/).filter(Boolean).forEach(l => {
-              const parts = l.trim().split(/\s+/);
-              const a = parseInt(parts[0], 10); const d = parseInt(parts[1], 10);
-              add += Number.isFinite(a) ? a : 0;
-              del += Number.isFinite(d) ? d : 0;
-            });
-            core.setOutput('added', String(add));
-            core.setOutput('deleted', String(del));
+            // 4) Use PR payload counts (always reliable)
+            const added = Number(pr.additions || 0);
+            const deleted = Number(pr.deletions || 0);
+            core.setOutput('added', String(added));
+            core.setOutput('deleted', String(deleted));
 
-      - name: Comment JSON summary (runs even if validation failed)
+      - name: Comment JSON summary (always)
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const ai = core.getInput('ai_pct') || 'NaN';
-            const added = core.getInput('added') || '0';
-            const deleted = core.getInput('deleted') || '0';
+            const ai = core.getInput('ai_pct') || null;
+            const added = Number(core.getInput('added') || 0);
+            const deleted = Number(core.getInput('deleted') || 0);
+
             const summary = {
-              declared_ai_pct: (isNaN(Number(ai)) ? null : Number(ai)),
-              added_lines: Number(added),
-              deleted_lines: Number(deleted)
+              declared_ai_pct: (ai === null || isNaN(Number(ai))) ? null : Number(ai),
+              added_lines: added,
+              deleted_lines: deleted
             };
+
+            // Add a short reason if job failed
+            const outcome = '${{ job.status }}';
+            const reason = outcome === 'failure' ? 'Validation failed. Ensure the description contains a number 0–100 after the colon.' : null;
+
+            let body = "AI Attribution Summary\n\n```json\n" + JSON.stringify(summary, null, 2) + "\n```";
+            if (reason) body += "\n\n**Reason:** " + reason;
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: "AI Attribution Summary\n\n```json\n" + JSON.stringify(summary, null, 2) + "\n```"
+              body
             });
