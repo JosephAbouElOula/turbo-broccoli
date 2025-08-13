@@ -1,4 +1,3 @@
-
 name: AI Attribution Check
 
 on:
@@ -35,19 +34,21 @@ jobs:
             ) || "";
 
             if (!line) {
-              core.setFailed("Missing line: 'Estimated % of new/changed code from AI (0–100): <number>' in PR DESCRIPTION.");
-            } else if (line.includes("__")) {
+              core.setFailed("Missing 'Estimated % of new/changed code from AI' line in PR DESCRIPTION.");
+            }
+            if (line.includes("__")) {
               core.setFailed("Placeholder '__' found. Enter an integer 0–100 in the PR DESCRIPTION.");
             }
 
-            // 3) Extract the first integer and validate range 0..100
-            let ai = -1;
-            const m = line.match(/(\d{1,3})/);
-            if (m) ai = Number(m[1]);
-            if (!(ai >= 0 && ai <= 100)) {
-              core.setFailed(`Invalid AI%: '${ai}'. Must be an integer 0–100 in the PR DESCRIPTION.`);
+            // 3) Extract the integer **after the colon**
+            const m = line.match(/:\s*([0-9]{1,3})\b/);
+            if (!m) {
+              core.setFailed("Missing integer after ':' on the Estimated % line.");
             }
-
+            const ai = Number(m ? m[1] : NaN);
+            if (!(ai >= 0 && ai <= 100)) {
+              core.setFailed(`Invalid AI%: '${ai}'. Must be an integer between 0 and 100.`);
+            }
             core.setOutput('ai_pct', String(ai));
 
             // 4) Compute added/deleted lines
