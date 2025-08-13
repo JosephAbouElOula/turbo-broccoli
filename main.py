@@ -7,5 +7,7 @@ def main():
     print ("test 6")    
     print ("test 7")
     print ("test 8")
+    print ("test 7")
+    print ("test 8")
  if __name__ == "__main__":
     main()
