@@ -73,3 +73,136 @@ jobs:
               issue_number: context.payload.pull_request.number,
               body
             });
+name: AI Attribution Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+concurrency:
+  group: ai-attrib-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  ai-attribution:  # context shown in branch protection: "AI Attribution Check / ai-attribution"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate AI% and compute LOC (via PR Files API)
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 1) Read PR DESCRIPTION (not comments)
+            const pr = context.payload.pull_request;
+            const body = pr?.body ?? "";
+            core.info("----- PR BODY BEGIN -----\n" + body + "\n----- PR BODY END -----");
+
+            // 2) Find the declaration line
+            const line = (body.split(/\r?\n/).find(l =>
+              /^[-*]?\s*Estimated % of new\/changed code from AI/i.test(l)
+            )) || "";
+
+            if (!line) { core.setFailed("Missing: 'Estimated % of new/changed code from AI (0–100): <number>' in PR DESCRIPTION."); return; }
+            if (line.includes("__")) { core.setFailed("Placeholder '__' found. Enter an integer 0–100 in the PR DESCRIPTION."); return; }
+
+            // 3) Extract integer AFTER the colon (ignore '(0–100)')
+            const m = line.match(/:\s*([0-9]{1,3})\b/);
+            if (!m) { core.setFailed("Missing integer after ':' on the Estimated % line."); return; }
+            const ai = Number(m[1]);
+            if (!(ai >= 0 && ai <= 100)) { core.setFailed(`Invalid AI%: '${ai}'. Must be 0–100.`); return; }
+            core.setOutput('ai_pct', String(ai));
+
+            // 4) Robust LOC totals using PR Files API (handles pagination)
+            let added = 0, deleted = 0;
+            const per_page = 100;
+            for (let page = 1; ; page++) {
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page,
+                page
+              });
+              if (!files.length) break;
+              for (const f of files) {
+                added  += Number(f.additions || 0);
+                deleted += Number(f.deletions || 0);
+              }
+              if (files.length < per_page) break;
+            }
+            const changed = added + deleted;
+            const net = added - deleted;
+
+            core.setOutput('added', String(added));
+            core.setOutput('deleted', String(deleted));
+            core.setOutput('changed', String(changed));
+            core.setOutput('net', String(net));
+
+      - name: Post PR comment (always)
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          DECLARED_AI_PCT: ${{ steps.validate.outputs.ai_pct }}
+          ADDED_LINES:     ${{ steps.validate.outputs.added }}
+          DELETED_LINES:   ${{ steps.validate.outputs.deleted }}
+          CHANGED_LINES:   ${{ steps.validate.outputs.changed }}
+          NET_DELTA:       ${{ steps.validate.outputs.net }}
+        with:
+          script: |
+            const ai      = process.env.DECLARED_AI_PCT;
+            const added   = Number(process.env.ADDED_LINES   || 0);
+            const deleted = Number(process.env.DELETED_LINES || 0);
+            const changed = Number(process.env.CHANGED_LINES || 0);
+            const net     = Number(process.env.NET_DELTA     || 0);
+
+            const summary = {
+              declared_ai_pct: (ai === null || ai === '' || isNaN(Number(ai))) ? null : Number(ai),
+              added_lines: added,
+              deleted_lines: deleted,
+              changed_lines: changed,
+              net_delta: net
+            };
+
+            const outcome = '${{ job.status }}';
+            let body = "AI Attribution Summary\n\n```json\n" + JSON.stringify(summary, null, 2) + "\n```";
+            if (outcome === 'failure') {
+              body += "\n\n**Reason:** Validation failed. Put an integer 0–100 after the colon in the PR description.";
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });
+
+      - name: Step summary (always)
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          DECLARED_AI_PCT: ${{ steps.validate.outputs.ai_pct }}
+          ADDED_LINES:     ${{ steps.validate.outputs.added }}
+          DELETED_LINES:   ${{ steps.validate.outputs.deleted }}
+          CHANGED_LINES:   ${{ steps.validate.outputs.changed }}
+          NET_DELTA:       ${{ steps.validate.outputs.net }}
+        with:
+          script: |
+            const ai      = process.env.DECLARED_AI_PCT;
+            const added   = Number(process.env.ADDED_LINES   || 0);
+            const deleted = Number(process.env.DELETED_LINES || 0);
+            const changed = Number(process.env.CHANGED_LINES || 0);
+            const net     = Number(process.env.NET_DELTA     || 0);
+            const outcome = '${{ job.status }}';
+
+            await core.summary
+              .addHeading('AI Attribution Summary')
+              .addTable([
+                [{data:'Declared AI %', header:true},{data:'Added', header:true},{data:'Deleted', header:true},{data:'Changed', header:true},{data:'Net Δ', header:true},{data:'Status', header:true}],
+                [String(isNaN(Number(ai)) ? '—' : ai), String(added), String(deleted), String(changed), String(net), outcome]
+              ])
+              .write();
