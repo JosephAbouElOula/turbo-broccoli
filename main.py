@@ -8,10 +8,6 @@ def sum_three(int1, int2, int3):
     return int1 + int2 + int3
 
 
-def multiply(int1, int2, int3):
-    """Return the product of three integers."""
-    return int1 * int2 * int3
-
 
 def main():
     print("test 1")
@@ -30,7 +26,7 @@ def main():
     int2 = 2
     int3 = 3
     print(sum_three(int1, int2, int3))
-    print(multiply(int1, int2, int3))
+
 
 
 if __name__ == "__main__":
