@@ -2,6 +2,11 @@ def print_sum(a, b):
     """Print the sum of two integers."""
     print(a + b)
 
+
+def multiply(a, b, c):
+    """Return the product of three numbers."""
+    return a * b * c
+
 def main():
     print("test 1")
     print("test 2")
@@ -15,6 +20,8 @@ def main():
     print("test 9")
     print("test 10")
     print_sum(2, 3)
+    print(multiply(2, 3, 4))
+    print(multiply(6, 1, 5))
 
 if __name__ == "__main__":
     main()
