@@ -21,6 +21,7 @@ def main():
     print("test 10")
     print_sum(2, 3)
     print(multiply(2, 3, 4))
+    print(multiply(6, 1, 5))
 
 if __name__ == "__main__":
     main()
