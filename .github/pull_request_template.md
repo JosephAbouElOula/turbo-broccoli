@@ -7,7 +7,7 @@
   - [ ] None  
 
 <!-- ai-declared-start -->
-**Declared-AI-Percent:** 0
+**Declared-AI-Percent**: 0
 <!-- ai-declared-end -->
 
 - (Optional) How was AI output reviewed/edited? __
