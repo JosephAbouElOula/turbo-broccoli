@@ -84,16 +84,19 @@ function commitMeta(sha) {
 function commitMessage(sha) { return sh(`git log -1 --pretty=%B ${sha}`); }
 
 // STRICT trailer: a standalone line "AI: true" (avoids accidental matches in prose)
-function hasStrictAIMarker(message) {
-  return /^\s*AI:\s*true\s*$/im.test(message);
+function hasAIMarker(message) {
+  // Accepts "AI: true", "AI:true", "AI:True" anywhere in commit message
+  return /\bAI\s*:\s*true\b/i.test(message);
 }
+
 function isAICommit(meta, message) {
-  if (hasStrictAIMarker(message)) return true;
+  if (hasAIMarker(message)) return true;
   return aiAuthorPatterns.some(re =>
     re.test(meta.authorName) || re.test(meta.authorEmail) ||
     re.test(meta.committerName) || re.test(meta.committerEmail)
   );
 }
+
 
 // --- Diff volume per commit: (added + deleted) across files (ignores binary lines '-')
 function changedLines(sha) {
