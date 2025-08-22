@@ -1,19 +1,11 @@
 /**
  * AI vs Human attribution for a PR.
- * - Computes % from commits (based on added lines).
- * - Parses Declared AI% from the PR body (tolerant parser).
- * - If event payload body is stale/missing, refetches via GitHub API.
- * - Validates Declared AI% is an integer in 0..100 (fails job if invalid/missing).
+ * - Computes % from commits using (added + deleted) line volume.
+ * - Parses Declared AI% from PR body (**Declared-AI-Percent**: N) with colon outside bold.
+ * - Refetches PR body via API if event payload is stale.
+ * - Validates Declared 0..100 (fails job if invalid/missing).
  * - Final AI% = max(Computed, Declared).
- * - Emits Markdown for a single PR comment and a concise job summary via GITHUB_ENV.
- *
- * Requirements in the workflow:
- *   - actions/checkout@v4 with fetch-depth: 0
- *   - Provide GITHUB_TOKEN env to this step (env: GITHUB_TOKEN: ${{ github.token }})
- *
- * Outputs written to GITHUB_ENV:
- *   - ATTRIBUTION_MD   : Markdown for the PR comment (marker used for idempotent updates)
- *   - ATTRIBUTION_SUMMARY : One-line summary for the job
+ * - Exports Markdown (ATTRIBUTION_MD) and a summary (ATTRIBUTION_SUMMARY) via GITHUB_ENV.
  */
 
 const { execSync } = require('node:child_process');
@@ -27,7 +19,7 @@ function sh(cmd) {
 function readEvent() {
   const p = process.env.GITHUB_EVENT_PATH;
   if (!p || !fs.existsSync(p)) {
-    console.error('GITHUB_EVENT_PATH is missing; this script must run on a pull_request event.');
+    console.error('GITHUB_EVENT_PATH is missing; run on pull_request.');
     process.exit(1);
   }
   return JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -36,51 +28,37 @@ function readEvent() {
 const event = readEvent();
 const pr = event.pull_request;
 if (!pr) {
-  console.error('This workflow expects a pull_request event with pull_request payload.');
+  console.error('Expected pull_request payload.');
   process.exit(1);
 }
 
-// -----------------------------------------------------------------------------
-// 1) Ensure we have both base and head locally, then enumerate commits in range
-// -----------------------------------------------------------------------------
+// --- Ensure base/head SHAs exist locally and enumerate commits in base..head
 const repoFull = process.env.GITHUB_REPOSITORY || '';
 const [owner, repo] = repoFull.split('/');
 
-// Prefer exact SHAs from payload to avoid ambiguity
 const baseSha = (pr.base && pr.base.sha) ? pr.base.sha : null;
 const headSha = (pr.head && pr.head.sha) ? pr.head.sha : sh('git rev-parse HEAD');
 
-// Make sure base exists locally (checkout step should fetch origin, but be safe)
 try {
   if (baseSha) {
-    // Create a local ref for the base SHA without altering the working tree
     sh(`git cat-file -e ${baseSha}^{commit} || git fetch --no-tags --prune --depth=0 origin +${baseSha}:${baseSha}`);
   }
 } catch (e) {
-  console.error('Warning: failed to fetch base SHA locally:', e.message || e);
+  console.error('Warning: could not ensure base SHA locally:', e.message || e);
 }
 
-if (!baseSha) {
-  console.error('Could not resolve base SHA from event payload.');
-  process.exit(1);
-}
-if (!headSha) {
-  console.error('Could not resolve head SHA.');
-  process.exit(1);
-}
+if (!baseSha) { console.error('Missing base SHA.'); process.exit(1); }
+if (!headSha) { console.error('Missing head SHA.'); process.exit(1); }
 
-// List commits strictly in base..head (exclude base itself)
 let commits = [];
 try {
   commits = sh(`git rev-list ${baseSha}..${headSha}`).split('\n').filter(Boolean);
 } catch (e) {
-  console.error('Failed to list commits in PR range:', e.message || e);
+  console.error('Failed to list PR commits:', e.message || e);
   process.exit(1);
 }
 
-// -----------------------------------------------------------------------------
-// 2) Classification: detect AI commits via author/committer or trailer "AI: true"
-// -----------------------------------------------------------------------------
+// --- Classification rules (author/bot patterns + strict trailer)
 let aiAuthorPatterns = [
   /codex/i,
   /copilot/i,
@@ -92,94 +70,76 @@ let aiAuthorPatterns = [
 const extraPatternsFile = path.join('.github', 'ai-authors.txt');
 if (fs.existsSync(extraPatternsFile)) {
   const extra = fs.readFileSync(extraPatternsFile, 'utf8')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean);
+    .split('\n').map(l => l.trim()).filter(Boolean);
   for (const line of extra) {
     try { aiAuthorPatterns.push(new RegExp(line, 'i')); } catch {}
   }
 }
 
 function commitMeta(sha) {
-  const fmt = ['%H', '%an', '%ae', '%cn', '%ce'].join('%n');
+  const fmt = ['%H','%an','%ae','%cn','%ce'].join('%n');
   const out = sh(`git show -s --format=${fmt} ${sha}`).split('\n');
-  return {
-    sha: out[0],
-    authorName: out[1],
-    authorEmail: out[2],
-    committerName: out[3],
-    committerEmail: out[4],
-  };
+  return { sha: out[0], authorName: out[1], authorEmail: out[2], committerName: out[3], committerEmail: out[4] };
 }
+function commitMessage(sha) { return sh(`git log -1 --pretty=%B ${sha}`); }
 
-function commitMessage(sha) {
-  return sh(`git log -1 --pretty=%B ${sha}`);
+// STRICT trailer: a standalone line "AI: true" (avoids accidental matches in prose)
+function hasStrictAIMarker(message) {
+  return /^\s*AI:\s*true\s*$/im.test(message);
 }
-
 function isAICommit(meta, message) {
-  if (/^\s*AI:\s*true\s*$/im.test(message)) return true;
+  if (hasStrictAIMarker(message)) return true;
   return aiAuthorPatterns.some(re =>
-    re.test(meta.authorName) ||
-    re.test(meta.authorEmail) ||
-    re.test(meta.committerName) ||
-    re.test(meta.committerEmail)
+    re.test(meta.authorName) || re.test(meta.authorEmail) ||
+    re.test(meta.committerName) || re.test(meta.committerEmail)
   );
 }
 
-function addedLines(sha) {
+// --- Diff volume per commit: (added + deleted) across files (ignores binary lines '-')
+function changedLines(sha) {
   const out = sh(`git show --numstat --format= ${sha}`);
-  let added = 0;
+  let changed = 0;
   if (!out) return 0;
   for (const line of out.split('\n')) {
     const m = line.match(/^(\d+|-)\s+(\d+|-)\s+/);
-    if (m && m[1] !== '-' && m[2] !== '-') {
-      added += parseInt(m[1], 10);
-    }
+    if (!m) continue;
+    const a = (m[1] === '-') ? 0 : parseInt(m[1], 10);
+    const d = (m[2] === '-') ? 0 : parseInt(m[2], 10);
+    if (!Number.isNaN(a)) changed += a;
+    if (!Number.isNaN(d)) changed += d;
   }
-  return added;
+  return changed;
 }
 
-// Aggregate across commits
-let aiAdded = 0;
-let humanAdded = 0;
+// --- Aggregate volume across commits into AI vs Human buckets
+let aiVol = 0, humanVol = 0;
 const details = [];
 
 for (const c of commits) {
   const meta = commitMeta(c);
   const msg = commitMessage(c);
-  const added = addedLines(c);
+  const vol = changedLines(c);               // <-- FIX: counts edits & deletes too
   const ai = isAICommit(meta, msg);
-  if (ai) aiAdded += added; else humanAdded += added;
-  details.push({
-    sha: c,
-    author: `${meta.authorName} <${meta.authorEmail}>`,
-    added,
-    label: ai ? 'AI' : 'Human'
-  });
+  if (ai) aiVol += vol; else humanVol += vol;
+  details.push({ sha: c, author: `${meta.authorName} <${meta.authorEmail}>`, volume: vol, label: ai ? 'AI' : 'Human' });
 }
 
-const totalAdded = aiAdded + humanAdded;
-const computedPct = totalAdded === 0 ? 0 : Math.round((aiAdded / totalAdded) * 100);
+const totalVol = aiVol + humanVol;
+const computedPct = totalVol === 0 ? 0 : Math.round((aiVol / totalVol) * 100);
 
-// -----------------------------------------------------------------------------
-// 3) Parse Declared AI% from PR body (tolerant) + API fallback if needed
-// -----------------------------------------------------------------------------
+// --- Parse Declared from PR body (colon OUTSIDE bold)
 function parseDeclared(body) {
   if (!body) return null;
 
-  // Tolerant Declared matcher:
-  //  - optional bold **...**
-  //  - different dash characters
-  //  - optional whitespace and optional trailing %
-  const declRe =
-    /(?:\*\*)?\s*Declared[\-\u2010-\u2015\u2212]AI[\-\u2010-\u2015\u2212]Percent(?:\*\*)?\s*:\s*([0-9]{1,3})\s*%?\s*/i;
+  // Matches: **Declared-AI-Percent**: 40   (colon outside bold, optional %)
+  const declStrict =
+    /(?:\*\*)\s*Declared[\-\u2010-\u2015\u2212]AI[\-\u2010-\u2015\u2212]Percent\s*(?:\*\*)\s*:\s*([0-9]{1,3})\s*%?\s*/i;
 
-  // Friendly "Estimated %" fallback
-  const estRe = /Estimated\s*%[^0-9]*([0-9]{1,3})/i;
+  // Fallback: "Estimated % ... 40"
+  const declAlt = /Estimated\s*%[^0-9]*([0-9]{1,3})/i;
 
-  const m = body.match(declRe) || body.match(estRe);
+  const m = body.match(declStrict) || body.match(declAlt);
   if (!m) return null;
-
   const n = parseInt(m[1], 10);
   return Number.isNaN(n) ? null : n;
 }
@@ -187,21 +147,20 @@ function parseDeclared(body) {
 let prBody = (pr.body || '').trim();
 let declaredPct = parseDeclared(prBody);
 
-// Payload can be stale on some events (e.g., synchronize). Refetch body via API if not found.
+// Refetch PR body if payload stale
 if ((declaredPct === null || Number.isNaN(declaredPct)) && process.env.GITHUB_TOKEN && owner && repo) {
   try {
-    const curlCmd = [
+    const out = sh([
       'curl -sS',
       `-H "Authorization: Bearer ${process.env.GITHUB_TOKEN}"`,
       '-H "Accept: application/vnd.github+json"',
       `"https://api.github.com/repos/${owner}/${repo}/pulls/${pr.number}"`
-    ].join(' ');
-    const out = sh(curlCmd);
+    ].join(' '));
     const fresh = JSON.parse(out);
     const freshBody = (fresh && fresh.body ? fresh.body : '').trim();
     declaredPct = parseDeclared(freshBody);
   } catch (e) {
-    console.error('Warning: failed to refetch PR body from GitHub API:', e.message || e);
+    console.error('Warning: refetch PR body failed:', e.message || e);
   }
 }
 
@@ -209,44 +168,39 @@ if ((declaredPct === null || Number.isNaN(declaredPct)) && process.env.GITHUB_TO
 if (declaredPct === null || declaredPct < 0 || declaredPct > 100) {
   console.error(
     'Declared AI% is missing or invalid. Provide a single integer 0..100 in the PR body, e.g.:\n' +
-    '**Declared-AI-Percent:** 60'
+    '**Declared-AI-Percent**: 60'
   );
   process.exit(1);
 }
 
-// -----------------------------------------------------------------------------
-// 4) Final % and outputs
-// -----------------------------------------------------------------------------
+// --- Final and outputs
 const finalPct = Math.max(computedPct, declaredPct);
 const marker = '<!-- ai-attribution-marker -->';
 
 const md = `${marker}
 **AI Attribution (recomputed at HEAD):**
 
-- **Computed AI%:** ${computedPct}%
+- **Computed AI% (by diff volume):** ${computedPct}%
 - **Declared AI% (from PR body):** ${declaredPct}%
 - **Final AI% (max of both):** ${finalPct}%
 
-- AI-added lines (computed): ${aiAdded} (${computedPct}%)
-- Human-added lines (computed): ${humanAdded} (${100 - computedPct}%)
-- Total added lines: ${totalAdded}
+- AI diff volume (added+deleted): ${aiVol}
+- Human diff volume (added+deleted): ${humanVol}
+- Total diff volume: ${totalVol}
 
 <details><summary>Per-commit details</summary>
 
-| Commit | Author | Added | Label |
+| Commit | Author | Changed (±) | Label |
 |---|---|---:|---|
-${details.map(d => `| \`${d.sha.slice(0,7)}\` | ${d.author} | ${d.added} | ${d.label} |`).join('\n')}
+${details.map(d => `| \`${d.sha.slice(0,7)}\` | ${d.author} | ${d.volume} | ${d.label} |`).join('\n')}
 </details>
 `;
 
 const summary = `Computed ${computedPct}% · Declared ${declaredPct}% · Final ${finalPct}% (${baseSha.slice(0,7)}..${headSha.slice(0,7)})`;
 
-// Export to next steps
+// Export to env for YAML step
 const envFile = process.env.GITHUB_ENV;
-if (!envFile) {
-  console.error('GITHUB_ENV is not set; cannot pass data to subsequent steps.');
-  process.exit(1);
-}
+if (!envFile) { console.error('GITHUB_ENV missing.'); process.exit(1); }
 fs.appendFileSync(envFile, `\nATTRIBUTION_MD<<EOF\n${md}\nEOF\n`);
 fs.appendFileSync(envFile, `ATTRIBUTION_SUMMARY=${summary}\n`);
 
